@@ -263,7 +263,8 @@ async def msg_symbol(message: Message, state: FSMContext):
         return
     # Store the exchange/symbol that actually resolved (may be the futures
     # variant, e.g. binance -> binanceusdm, or a perpetual notation like BTC/USDT:USDT)
-    await state.update_data(exchange=actual_ex_id, symbol=actual_symbol)
+    # and the current price, so it stays visible on every later step of this flow.
+    await state.update_data(exchange=actual_ex_id, symbol=actual_symbol, current_price=price)
     await state.set_state(AddAlert.choosing_condition)
     note = ""
     if actual_ex_id != ex_id:
@@ -279,27 +280,38 @@ async def cb_condition(callback: CallbackQuery, state: FSMContext):
     condition = callback.data.split(":", 1)[1]
     await state.update_data(condition=condition)
     await state.set_state(AddAlert.entering_price)
+    data = await state.get_data()
     word = "выше" if condition == "above" else "ниже"
-    await callback.message.edit_text(f"Введи целевую цену (сработает, когда цена станет {word} этого значения):")
+    current = data.get("current_price")
+    price_line = f"Текущая цена {data['symbol']}: {current:g}\n" if current is not None else ""
+    await callback.message.edit_text(
+        f"{price_line}Введи целевую цену (сработает, когда цена станет {word} этого значения):"
+    )
     await callback.answer()
 
 
 @dp.message(AddAlert.entering_price)
 async def msg_price(message: Message, state: FSMContext):
+    data = await state.get_data()
     try:
         price = float(message.text.strip().replace(",", "."))
         if price <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("Введи число, например 65000 или 0.015")
+        current = data.get("current_price")
+        hint = f" (текущая цена {data['symbol']}: {current:g})" if current is not None else ""
+        await message.answer(f"Введи число, например 65000 или 0.015{hint}")
         return
     await state.update_data(target_price=price)
     data = await state.get_data()
     word = "выше" if data["condition"] == "above" else "ниже"
+    current = data.get("current_price")
+    current_line = f"Текущая цена: {current:g}\n" if current is not None else ""
     await state.set_state(AddAlert.confirming)
     await message.answer(
         f"Биржа: {exchange_label(data['exchange'])}\n"
         f"Пара: {data['symbol']}\n"
+        f"{current_line}"
         f"Условие: цена {word} {price:g}\n\nСоздать алерт?",
         reply_markup=confirm_kb(),
     )
