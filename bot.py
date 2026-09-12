@@ -29,6 +29,7 @@ ALLOWED_USER_IDS = {int(x) for x in os.getenv("ALLOWED_USER_IDS", "").split(",")
 POPULAR_EXCHANGES = ["binance", "bybit", "okx", "aster", "bitget", "kucoin"]
 EXCHANGE_LABELS = {
     "binance": "Binance",
+    "binanceusdm": "Binance Futures",
     "bybit": "Bybit",
     "okx": "OKX",
     "aster": "Aster",
@@ -256,14 +257,19 @@ async def msg_symbol(message: Message, state: FSMContext):
     ex_id = data["exchange"]
     symbol = message.text.strip().upper()
     try:
-        price = await exchanges.validate_symbol_and_get_price(ex_id, symbol)
+        actual_ex_id, actual_symbol, price = await exchanges.resolve_symbol(ex_id, symbol)
     except Exception as e:
         await message.answer(f"{e}\nПроверь формат (например BTC/USDT) и попробуй ещё раз.")
         return
-    await state.update_data(symbol=symbol)
+    # Store the exchange/symbol that actually resolved (may be the futures
+    # variant, e.g. binance -> binanceusdm, or a perpetual notation like BTC/USDT:USDT)
+    await state.update_data(exchange=actual_ex_id, symbol=actual_symbol)
     await state.set_state(AddAlert.choosing_condition)
+    note = ""
+    if actual_ex_id != ex_id:
+        note = f" (нашёл на {exchange_label(actual_ex_id)})"
     await message.answer(
-        f"Текущая цена {symbol} на {exchange_label(ex_id)}: {price:g}\nУсловие срабатывания:",
+        f"Текущая цена {actual_symbol} на {exchange_label(actual_ex_id)}{note}: {price:g}\nУсловие срабатывания:",
         reply_markup=condition_kb(),
     )
 

@@ -1,6 +1,15 @@
+import difflib
+
 import ccxt.async_support as ccxt_async
 
 _exchange_cache: dict[str, "ccxt_async.Exchange"] = {}
+
+# Some exchanges split spot and derivatives into separate ccxt exchange classes
+# (unlike e.g. bybit/okx, where a single instance's markets already cover both).
+# When a symbol isn't found on the "main" id, we also try the linked futures id.
+FUTURES_FALLBACK = {
+    "binance": "binanceusdm",
+}
 
 
 async def get_exchange(exchange_id: str):
@@ -19,14 +28,55 @@ async def get_exchange(exchange_id: str):
     return _exchange_cache[exchange_id]
 
 
-async def validate_symbol_and_get_price(exchange_id: str, symbol: str) -> float:
-    """Raises ValueError with a human-readable message if the symbol doesn't exist."""
-    exchange = await get_exchange(exchange_id)
+def _symbol_candidates(symbol: str) -> list[str]:
+    """BTC/USDT -> also try BTC/USDT:USDT (linear perpetual notation)."""
+    candidates = [symbol]
+    if "/" in symbol and ":" not in symbol:
+        quote = symbol.split("/")[1]
+        candidates.append(f"{symbol}:{quote}")
+    return candidates
+
+
+def _closest_symbols(symbol: str, markets: dict, limit: int = 3) -> list[str]:
+    base = symbol.split("/")[0] if "/" in symbol else symbol
+    same_base = [m for m in markets if m.split("/")[0] == base]
+    pool = same_base if same_base else list(markets.keys())
+    return difflib.get_close_matches(symbol, pool, n=limit, cutoff=0.4)
+
+
+async def resolve_symbol(exchange_id: str, symbol: str) -> tuple[str, str, float]:
+    """Find `symbol` on `exchange_id`, falling back to its linked futures exchange
+    (e.g. binance -> binanceusdm) if it's not on the spot market.
+
+    Returns (actual_exchange_id, actual_symbol, current_price).
+    Raises ValueError with a human-readable message (incl. close-match
+    suggestions) if the symbol isn't found anywhere.
+    """
     symbol = symbol.upper().strip()
-    if symbol not in exchange.markets:
-        raise ValueError(f"Пара '{symbol}' не найдена на бирже '{exchange_id}'")
-    ticker = await exchange.fetch_ticker(symbol)
-    return ticker["last"]
+    exchange_id = exchange_id.lower().strip()
+    tried_ids = [exchange_id]
+    if exchange_id in FUTURES_FALLBACK:
+        tried_ids.append(FUTURES_FALLBACK[exchange_id])
+
+    suggestions: list[str] = []
+    for ex_id in tried_ids:
+        try:
+            exchange = await get_exchange(ex_id)
+        except ValueError:
+            continue
+        for candidate in _symbol_candidates(symbol):
+            if candidate in exchange.markets:
+                ticker = await exchange.fetch_ticker(candidate)
+                return ex_id, candidate, ticker["last"]
+        suggestions.extend(_closest_symbols(symbol, exchange.markets))
+
+    msg = f"Пара '{symbol}' не найдена на '{exchange_id}'"
+    if exchange_id in FUTURES_FALLBACK:
+        msg += f" (проверил и спот, и {FUTURES_FALLBACK[exchange_id]})"
+    if suggestions:
+        uniq = list(dict.fromkeys(suggestions))[:3]
+        msg += f". Может, имел в виду: {', '.join(uniq)}?"
+    raise ValueError(msg)
 
 
 async def fetch_prices_for_exchange(exchange_id: str, symbols: list[str]) -> dict[str, float]:
