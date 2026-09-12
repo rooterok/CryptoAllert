@@ -47,6 +47,7 @@ class AddAlert(StatesGroup):
     entering_symbol = State()
     choosing_condition = State()
     entering_price = State()
+    choosing_mode = State()
     confirming = State()
 
 
@@ -108,9 +109,23 @@ def confirm_kb() -> InlineKeyboardMarkup:
     )
 
 
+def mode_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔂 Один раз", callback_data="mode:one_time")],
+            [InlineKeyboardButton(text="🔁 Повторяющийся", callback_data="mode:recurring")],
+            [InlineKeyboardButton(text="✖ Отмена", callback_data="cancel")],
+        ]
+    )
+
+
+MODE_LABELS = {"one_time": "один раз", "recurring": "повторяющийся"}
+
+
 def alert_line(a: dict) -> str:
     arrow = "выше" if a["condition"] == "above" else "ниже"
-    return f"{exchange_label(a['exchange'])} · {a['symbol']} · {arrow} {a['target_price']:g}"
+    icon = "🔁" if a.get("mode") == "recurring" else "🔂"
+    return f"{icon} {exchange_label(a['exchange'])} · {a['symbol']} · {arrow} {a['target_price']:g}"
 
 
 def alerts_list_kb(alerts: list[dict]) -> InlineKeyboardMarkup:
@@ -162,12 +177,13 @@ async def cb_menu_back(callback: CallbackQuery, state: FSMContext):
 async def cb_help(callback: CallbackQuery):
     await callback.message.edit_text(
         "Как это работает:\n\n"
-        "1. «Добавить алерт» — выбираешь биржу, пару (например BTC/USDT) и цену, "
-        "выше или ниже которой должно сработать уведомление.\n"
+        "1. «Добавить алерт» — выбираешь биржу, пару (например BTC/USDT), цену "
+        "(выше/ниже которой сработать) и режим: 🔂 один раз, или 🔁 повторяющийся "
+        f"(будет присылать снова при каждом срабатывании, не чаще раза в {db.RECURRING_COOLDOWN_MINUTES} мин).\n"
         "2. Бот раз в несколько секунд проверяет цену через биржевые API.\n"
-        "3. Как только условие выполняется — приходит push в Pushover, "
-        "а алерт переходит из активных в сработавшие.\n"
-        "4. «Мои алерты» — список активных, с кнопкой 🗑 для удаления.",
+        "3. Как только условие выполняется — приходит push в Pushover. "
+        "Одноразовый алерт после этого переходит в сработавшие, повторяющийся остаётся активным.\n"
+        "4. «Мои алерты» — список активных (🔂/🔁 показывает тип), с кнопкой 🗑 для удаления.",
         reply_markup=main_menu_kb(),
     )
     await callback.answer()
@@ -303,18 +319,33 @@ async def msg_price(message: Message, state: FSMContext):
         await message.answer(f"Введи число, например 65000 или 0.015{hint}")
         return
     await state.update_data(target_price=price)
+    await state.set_state(AddAlert.choosing_mode)
+    await message.answer(
+        "Один раз — сработает и отключится.\n"
+        f"Повторяющийся — будет присылать уведомление каждый раз, когда условие выполняется "
+        f"(не чаще раза в {db.RECURRING_COOLDOWN_MINUTES} мин).\n\nКакой режим?",
+        reply_markup=mode_kb(),
+    )
+
+
+@dp.callback_query(AddAlert.choosing_mode, F.data.startswith("mode:"))
+async def cb_mode(callback: CallbackQuery, state: FSMContext):
+    mode = callback.data.split(":", 1)[1]
+    await state.update_data(mode=mode)
     data = await state.get_data()
     word = "выше" if data["condition"] == "above" else "ниже"
     current = data.get("current_price")
     current_line = f"Текущая цена: {current:g}\n" if current is not None else ""
     await state.set_state(AddAlert.confirming)
-    await message.answer(
+    await callback.message.edit_text(
         f"Биржа: {exchange_label(data['exchange'])}\n"
         f"Пара: {data['symbol']}\n"
         f"{current_line}"
-        f"Условие: цена {word} {price:g}\n\nСоздать алерт?",
+        f"Условие: цена {word} {data['target_price']:g}\n"
+        f"Режим: {MODE_LABELS[mode]}\n\nСоздать алерт?",
         reply_markup=confirm_kb(),
     )
+    await callback.answer()
 
 
 @dp.callback_query(AddAlert.confirming, F.data.startswith("confirm:"))
@@ -322,7 +353,14 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext):
     action = callback.data.split(":", 1)[1]
     if action == "yes":
         data = await state.get_data()
-        db.add_alert(callback.from_user.id, data["exchange"], data["symbol"], data["condition"], data["target_price"])
+        db.add_alert(
+            callback.from_user.id,
+            data["exchange"],
+            data["symbol"],
+            data["condition"],
+            data["target_price"],
+            data.get("mode", "one_time"),
+        )
         await callback.message.edit_text("Алерт создан ✅", reply_markup=main_menu_kb())
     else:
         await callback.message.edit_text("Отменено.", reply_markup=main_menu_kb())
@@ -352,14 +390,22 @@ async def check_alerts_job():
             triggered = (a["condition"] == "above" and price >= a["target_price"]) or (
                 a["condition"] == "below" and price <= a["target_price"]
             )
-            if triggered:
+            if not triggered:
+                continue
+            is_recurring = a.get("mode") == "recurring"
+            if is_recurring and db.is_in_cooldown(a):
+                continue  # already notified recently, price is still past the threshold
+            if is_recurring:
+                db.record_recurring_trigger(a["id"], price)
+            else:
                 db.mark_triggered(a["id"], price)
-                word = "выше" if a["condition"] == "above" else "ниже"
-                await send_pushover(
-                    title=f"{exchange_label(ex_id)} {a['symbol']}",
-                    message=f"Цена {word} {a['target_price']:g}: сейчас {price:g}",
-                )
-                logger.info("Alert %s triggered at %s", a["id"], price)
+            word = "выше" if a["condition"] == "above" else "ниже"
+            suffix = " (повторяющийся)" if is_recurring else ""
+            await send_pushover(
+                title=f"{exchange_label(ex_id)} {a['symbol']}",
+                message=f"Цена {word} {a['target_price']:g}: сейчас {price:g}{suffix}",
+            )
+            logger.info("Alert %s triggered at %s (mode=%s)", a["id"], price, a.get("mode"))
 
 
 async def main():
