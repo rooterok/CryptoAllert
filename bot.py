@@ -386,6 +386,10 @@ async def check_alerts_job():
         for a in ex_alerts:
             price = prices.get(a["symbol"])
             if price is None:
+                logger.warning(
+                    "No price for alert %s (%s %s) - fetch failed or symbol not in ticker response",
+                    a["id"], ex_id, a["symbol"],
+                )
                 continue
             triggered = (a["condition"] == "above" and price >= a["target_price"]) or (
                 a["condition"] == "below" and price <= a["target_price"]

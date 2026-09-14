@@ -1,6 +1,9 @@
 import difflib
+import logging
 
 import ccxt.async_support as ccxt_async
+
+logger = logging.getLogger("price-alerts-bot")
 
 _exchange_cache: dict[str, "ccxt_async.Exchange"] = {}
 
@@ -88,17 +91,18 @@ async def fetch_prices_for_exchange(exchange_id: str, symbols: list[str]) -> dic
         for s, t in tickers.items():
             if t.get("last") is not None:
                 prices[s] = t["last"]
-        return prices
-    except Exception:
-        pass
-    # Fallback: some exchanges don't support batch fetch_tickers with a symbol filter
-    for s in symbols:
+    except Exception as e:
+        logger.info("Batch fetch_tickers failed for %s %s, falling back per-symbol: %s", exchange_id, symbols, e)
+    # Fallback: some exchanges don't support batch fetch_tickers with a symbol filter,
+    # and/or the batch call above may have returned prices for only some symbols.
+    missing = [s for s in symbols if s not in prices]
+    for s in missing:
         try:
             t = await exchange.fetch_ticker(s)
             if t.get("last") is not None:
                 prices[s] = t["last"]
-        except Exception:
-            continue
+        except Exception as e:
+            logger.warning("Failed to fetch ticker for %s on %s: %s", s, exchange_id, e)
     return prices
 
 
