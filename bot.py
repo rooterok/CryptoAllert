@@ -166,6 +166,27 @@ async def cmd_myalerts(message: Message):
         await message.answer(f"Активные алерты ({len(alerts)}):", reply_markup=alerts_list_kb(alerts))
 
 
+@dp.message(Command("debug"))
+async def cmd_debug(message: Message):
+    """Raw dump of this user's last 20 alerts (any status) - for diagnosing why one didn't fire."""
+    if not is_allowed(message.from_user.id):
+        return
+    alerts = db.get_all_alerts(message.from_user.id)
+    if not alerts:
+        await message.answer("Алертов нет вообще (ни активных, ни сработавших).")
+        return
+    lines = []
+    for a in alerts:
+        word = "выше" if a["condition"] == "above" else "ниже"
+        lines.append(
+            f"#{a['id']} status={a['status']} mode={a.get('mode')}\n"
+            f"  {exchange_label(a['exchange'])} · {a['symbol']} · {word} {a['target_price']:g}\n"
+            f"  создан: {a['created_at']}\n"
+            f"  last_triggered_at: {a.get('last_triggered_at')} | triggered_price: {a.get('triggered_price')}"
+        )
+    await message.answer("\n\n".join(lines))
+
+
 @dp.callback_query(F.data == "menu:back")
 async def cb_menu_back(callback: CallbackQuery, state: FSMContext):
     await state.clear()

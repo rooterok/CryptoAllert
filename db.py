@@ -75,6 +75,16 @@ def get_active_alerts(user_id: int | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_all_alerts(user_id: int, limit: int = 20) -> list[dict]:
+    """All alerts for a user regardless of status, newest first - for debugging."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM alerts WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def delete_alert(alert_id: int, user_id: int) -> bool:
     conn = get_conn()
     cur = conn.execute("DELETE FROM alerts WHERE id = ? AND user_id = ?", (alert_id, user_id))
