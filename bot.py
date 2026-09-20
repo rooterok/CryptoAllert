@@ -397,6 +397,10 @@ async def check_alerts_job():
     for a in alerts:
         by_exchange.setdefault(a["exchange"], []).append(a)
 
+    # Drop any cached exchange (ccxt instance + its market catalog) that no
+    # active alert needs anymore, so memory tracks what's actually in use.
+    await exchanges.evict_unused(set(by_exchange.keys()))
+
     for ex_id, ex_alerts in by_exchange.items():
         symbols = list({a["symbol"] for a in ex_alerts})
         try:
