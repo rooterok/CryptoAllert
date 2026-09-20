@@ -106,6 +106,23 @@ async def fetch_prices_for_exchange(exchange_id: str, symbols: list[str]) -> dic
     return prices
 
 
+async def evict_unused(keep_ids: set[str]) -> None:
+    """Close and drop cached exchange instances that aren't needed anymore.
+
+    Without this, _exchange_cache only ever grows: any exchange touched even
+    once (e.g. just browsing the "choose exchange" keyboard while creating an
+    alert, or an alert that was later deleted) stays loaded in memory for the
+    life of the process, wasting RAM on market catalogs nobody uses anymore.
+    """
+    stale = [ex_id for ex_id in _exchange_cache if ex_id not in keep_ids]
+    for ex_id in stale:
+        exchange = _exchange_cache.pop(ex_id)
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+
+
 async def close_all_exchanges() -> None:
     for ex in _exchange_cache.values():
         try:
