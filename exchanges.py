@@ -1,11 +1,12 @@
 import difflib
+import importlib
 import logging
-
-import ccxt.async_support as ccxt_async
 
 logger = logging.getLogger("price-alerts-bot")
 
-_exchange_cache: dict[str, "ccxt_async.Exchange"] = {}
+# Value type is a ccxt.async_support exchange instance (e.g. ccxt.async_support.binance);
+# left untyped since exchange modules are now imported lazily, per exchange id, in get_exchange().
+_exchange_cache: dict[str, object] = {}
 
 # Some exchanges split spot and derivatives into separate ccxt exchange classes
 # (unlike e.g. bybit/okx, where a single instance's markets already cover both).
@@ -18,9 +19,11 @@ FUTURES_FALLBACK = {
 async def get_exchange(exchange_id: str):
     exchange_id = exchange_id.lower().strip()
     if exchange_id not in _exchange_cache:
-        if not hasattr(ccxt_async, exchange_id):
+        try:
+            module = importlib.import_module(f"ccxt.async_support.{exchange_id}")
+            klass = getattr(module, exchange_id)
+        except (ModuleNotFoundError, AttributeError):
             raise ValueError(f"Биржа '{exchange_id}' не поддерживается ccxt")
-        klass = getattr(ccxt_async, exchange_id)
         instance = klass({"enableRateLimit": True})
         try:
             await instance.load_markets()
