@@ -61,6 +61,21 @@ def exchange_label(ex_id: str) -> str:
     return EXCHANGE_LABELS.get(ex_id, ex_id.capitalize())
 
 
+async def _clear_old_markup(callback: CallbackQuery) -> None:
+    """Strip the inline keyboard off the message the button lives on.
+
+    Every navigation step now sends a brand-new message instead of editing
+    the old one in place, so the current state always shows up at the
+    bottom of the chat (not stuck wherever the very first menu message
+    happened to be sent). This just makes sure a stale button on that old,
+    now-scrolled-away message can't be pressed again.
+    """
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
 def main_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -128,15 +143,26 @@ def alert_line(a: dict) -> str:
     return f"{icon} {exchange_label(a['exchange'])} · {a['symbol']} · {arrow} {a['target_price']:g}"
 
 
+def alerts_list_text(alerts: list[dict]) -> str:
+    lines = [f"Активные алерты ({len(alerts)}):", ""]
+    for i, a in enumerate(alerts, 1):
+        lines.append(f"{i}. {alert_line(a)}")
+    return "\n".join(lines)
+
+
 def alerts_list_kb(alerts: list[dict]) -> InlineKeyboardMarkup:
-    rows = []
-    for a in alerts:
-        rows.append(
-            [
-                InlineKeyboardButton(text=alert_line(a), callback_data="noop"),
-                InlineKeyboardButton(text="🗑", callback_data=f"del:{a['id']}"),
-            ]
-        )
+    # Full details live in the message text above (unlimited width, wraps
+    # normally) - buttons just reference the alert by number, since cramming
+    # exchange/pair/price into a button label gets clipped on a phone screen.
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for i, a in enumerate(alerts, 1):
+        row.append(InlineKeyboardButton(text=f"🗑 {i}", callback_data=f"del:{a['id']}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
     rows.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -163,7 +189,7 @@ async def cmd_myalerts(message: Message):
     if not alerts:
         await message.answer("Активных алертов пока нет.", reply_markup=main_menu_kb())
     else:
-        await message.answer(f"Активные алерты ({len(alerts)}):", reply_markup=alerts_list_kb(alerts))
+        await message.answer(alerts_list_text(alerts), reply_markup=alerts_list_kb(alerts))
 
 
 @dp.message(Command("debug"))
@@ -190,13 +216,15 @@ async def cmd_debug(message: Message):
 @dp.callback_query(F.data == "menu:back")
 async def cb_menu_back(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("Главное меню:", reply_markup=main_menu_kb())
+    await _clear_old_markup(callback)
+    await callback.message.answer("Главное меню:", reply_markup=main_menu_kb())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "menu:help")
 async def cb_help(callback: CallbackQuery):
-    await callback.message.edit_text(
+    await _clear_old_markup(callback)
+    await callback.message.answer(
         "Как это работает:\n\n"
         "1. «Добавить алерт» — выбираешь биржу, пару (например BTC/USDT), цену "
         "(выше/ниже которой сработать) и режим: 🔂 один раз, или 🔁 повторяющийся "
@@ -212,23 +240,25 @@ async def cb_help(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu:list")
 async def cb_list(callback: CallbackQuery):
+    await _clear_old_markup(callback)
     alerts = db.get_active_alerts(callback.from_user.id)
     if not alerts:
-        await callback.message.edit_text("Активных алертов пока нет.", reply_markup=main_menu_kb())
+        await callback.message.answer("Активных алертов пока нет.", reply_markup=main_menu_kb())
     else:
-        await callback.message.edit_text(f"Активные алерты ({len(alerts)}):", reply_markup=alerts_list_kb(alerts))
+        await callback.message.answer(alerts_list_text(alerts), reply_markup=alerts_list_kb(alerts))
     await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("del:"))
 async def cb_delete(callback: CallbackQuery):
+    await _clear_old_markup(callback)
     alert_id = int(callback.data.split(":", 1)[1])
     db.delete_alert(alert_id, callback.from_user.id)
     alerts = db.get_active_alerts(callback.from_user.id)
     if not alerts:
-        await callback.message.edit_text("Активных алертов пока нет.", reply_markup=main_menu_kb())
+        await callback.message.answer("Активных алертов пока нет.", reply_markup=main_menu_kb())
     else:
-        await callback.message.edit_text(f"Активные алерты ({len(alerts)}):", reply_markup=alerts_list_kb(alerts))
+        await callback.message.answer(alerts_list_text(alerts), reply_markup=alerts_list_kb(alerts))
     await callback.answer("Удалено")
 
 
@@ -240,23 +270,26 @@ async def cb_noop(callback: CallbackQuery):
 @dp.callback_query(F.data == "cancel")
 async def cb_cancel(callback: CallbackQuery, state: FSMContext):
     await state.clear()
-    await callback.message.edit_text("Отменено.", reply_markup=main_menu_kb())
+    await _clear_old_markup(callback)
+    await callback.message.answer("Отменено.", reply_markup=main_menu_kb())
     await callback.answer()
 
 
 @dp.callback_query(F.data == "menu:add")
 async def cb_add(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AddAlert.choosing_exchange)
-    await callback.message.edit_text("Выбери биржу:", reply_markup=exchange_choice_kb())
+    await _clear_old_markup(callback)
+    await callback.message.answer("Выбери биржу:", reply_markup=exchange_choice_kb())
     await callback.answer()
 
 
 @dp.callback_query(AddAlert.choosing_exchange, F.data.startswith("ex:"))
 async def cb_choose_exchange(callback: CallbackQuery, state: FSMContext):
     ex_id = callback.data.split(":", 1)[1]
+    await _clear_old_markup(callback)
     if ex_id == "other":
         await state.set_state(AddAlert.entering_custom_exchange)
-        await callback.message.edit_text(
+        await callback.message.answer(
             "Введи id биржи латиницей, как в ccxt (например: kraken, gate, mexc, htx):"
         )
         await callback.answer()
@@ -265,12 +298,12 @@ async def cb_choose_exchange(callback: CallbackQuery, state: FSMContext):
     try:
         await exchanges.get_exchange(ex_id)
     except Exception as e:
-        await callback.message.edit_text(f"Ошибка подключения к {ex_id}: {e}", reply_markup=main_menu_kb())
+        await callback.message.answer(f"Ошибка подключения к {ex_id}: {e}", reply_markup=main_menu_kb())
         await state.clear()
         return
     await state.update_data(exchange=ex_id)
     await state.set_state(AddAlert.entering_symbol)
-    await callback.message.edit_text(
+    await callback.message.answer(
         f"Биржа: {exchange_label(ex_id)}\nТеперь введи пару, например: BTC/USDT"
     )
 
@@ -321,7 +354,8 @@ async def cb_condition(callback: CallbackQuery, state: FSMContext):
     word = "выше" if condition == "above" else "ниже"
     current = data.get("current_price")
     price_line = f"Текущая цена {data['symbol']}: {current:g}\n" if current is not None else ""
-    await callback.message.edit_text(
+    await _clear_old_markup(callback)
+    await callback.message.answer(
         f"{price_line}Введи целевую цену (сработает, когда цена станет {word} этого значения):"
     )
     await callback.answer()
@@ -358,7 +392,8 @@ async def cb_mode(callback: CallbackQuery, state: FSMContext):
     current = data.get("current_price")
     current_line = f"Текущая цена: {current:g}\n" if current is not None else ""
     await state.set_state(AddAlert.confirming)
-    await callback.message.edit_text(
+    await _clear_old_markup(callback)
+    await callback.message.answer(
         f"Биржа: {exchange_label(data['exchange'])}\n"
         f"Пара: {data['symbol']}\n"
         f"{current_line}"
@@ -372,6 +407,7 @@ async def cb_mode(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(AddAlert.confirming, F.data.startswith("confirm:"))
 async def cb_confirm(callback: CallbackQuery, state: FSMContext):
     action = callback.data.split(":", 1)[1]
+    await _clear_old_markup(callback)
     if action == "yes":
         data = await state.get_data()
         db.add_alert(
@@ -382,9 +418,9 @@ async def cb_confirm(callback: CallbackQuery, state: FSMContext):
             data["target_price"],
             data.get("mode", "one_time"),
         )
-        await callback.message.edit_text("Алерт создан ✅", reply_markup=main_menu_kb())
+        await callback.message.answer("Алерт создан ✅", reply_markup=main_menu_kb())
     else:
-        await callback.message.edit_text("Отменено.", reply_markup=main_menu_kb())
+        await callback.message.answer("Отменено.", reply_markup=main_menu_kb())
     await state.clear()
     await callback.answer()
 
