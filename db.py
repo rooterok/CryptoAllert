@@ -38,24 +38,34 @@ def init_db():
         )
         """
     )
-    # Lightweight migration for databases created before "recurring" alerts existed.
+    # Lightweight migrations for databases created before a field existed.
     existing = _column_names(conn, "alerts")
     if "mode" not in existing:
         conn.execute("ALTER TABLE alerts ADD COLUMN mode TEXT NOT NULL DEFAULT 'one_time'")
     if "last_triggered_at" not in existing:
         conn.execute("ALTER TABLE alerts ADD COLUMN last_triggered_at TEXT")
+    if "kind" not in existing:
+        # 'price' (target_price is a price) or 'funding' (target_price is a
+        # funding-rate fraction, e.g. 0.0001 = 0.01%). Old rows are all price alerts.
+        conn.execute("ALTER TABLE alerts ADD COLUMN kind TEXT NOT NULL DEFAULT 'price'")
     conn.commit()
     conn.close()
 
 
 def add_alert(
-    user_id: int, exchange: str, symbol: str, condition: str, target_price: float, mode: str = "one_time"
+    user_id: int,
+    exchange: str,
+    symbol: str,
+    condition: str,
+    target_price: float,
+    mode: str = "one_time",
+    kind: str = "price",
 ) -> int:
     conn = get_conn()
     cur = conn.execute(
-        "INSERT INTO alerts (user_id, exchange, symbol, condition, target_price, mode, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
-        (user_id, exchange, symbol, condition, target_price, mode, datetime.datetime.utcnow().isoformat()),
+        "INSERT INTO alerts (user_id, exchange, symbol, condition, target_price, mode, kind, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)",
+        (user_id, exchange, symbol, condition, target_price, mode, kind, datetime.datetime.utcnow().isoformat()),
     )
     conn.commit()
     alert_id = cur.lastrowid
@@ -63,16 +73,28 @@ def add_alert(
     return alert_id
 
 
-def get_active_alerts(user_id: int | None = None) -> list[dict]:
+def get_active_alerts(user_id: int | None = None, kind: str | None = None) -> list[dict]:
     conn = get_conn()
-    if user_id is None:
-        rows = conn.execute("SELECT * FROM alerts WHERE status = 'active'").fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM alerts WHERE status = 'active' AND user_id = ?", (user_id,)
-        ).fetchall()
+    query = "SELECT * FROM alerts WHERE status = 'active'"
+    params: list = []
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    if kind is not None:
+        query += " AND kind = ?"
+        params.append(kind)
+    rows = conn.execute(query, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_active_exchange_ids() -> set[str]:
+    """Distinct exchanges used by any active alert, of any kind - so the
+    ccxt instance cache knows what's still actually in use."""
+    conn = get_conn()
+    rows = conn.execute("SELECT DISTINCT exchange FROM alerts WHERE status = 'active'").fetchall()
+    conn.close()
+    return {r[0] for r in rows}
 
 
 def get_all_alerts(user_id: int, limit: int = 20) -> list[dict]:

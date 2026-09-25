@@ -85,6 +85,56 @@ async def resolve_symbol(exchange_id: str, symbol: str) -> tuple[str, str, float
     raise ValueError(msg)
 
 
+async def fetch_funding_rate(exchange_id: str, symbol: str) -> float:
+    """Current funding rate for a perpetual/swap symbol, as a raw fraction
+    (e.g. 0.0001 == 0.01%). Raises whatever ccxt raises if the exchange or
+    symbol doesn't support funding rates (e.g. it's a spot market)."""
+    exchange = await get_exchange(exchange_id)
+    data = await exchange.fetch_funding_rate(symbol)
+    rate = data.get("fundingRate")
+    if rate is None:
+        raise ValueError(f"Биржа не вернула ставку фандинга для {symbol}")
+    return rate
+
+
+async def resolve_funding_symbol(exchange_id: str, symbol: str) -> tuple[str, str, float]:
+    """Same idea as resolve_symbol, but validates candidates via the funding-rate
+    endpoint instead of the ticker - a symbol only qualifies if it's an actual
+    perpetual/swap contract with a funding rate, not just any listed market.
+
+    Returns (actual_exchange_id, actual_symbol, current_funding_rate).
+    """
+    symbol = symbol.upper().strip()
+    exchange_id = exchange_id.lower().strip()
+    tried_ids = [exchange_id]
+    if exchange_id in FUTURES_FALLBACK:
+        tried_ids.append(FUTURES_FALLBACK[exchange_id])
+
+    suggestions: list[str] = []
+    for ex_id in tried_ids:
+        try:
+            exchange = await get_exchange(ex_id)
+        except ValueError:
+            continue
+        for candidate in _symbol_candidates(symbol):
+            if candidate not in exchange.markets:
+                continue
+            try:
+                rate = await fetch_funding_rate(ex_id, candidate)
+            except Exception:
+                continue  # e.g. this candidate resolved to a spot market, not a perp
+            return ex_id, candidate, rate
+        suggestions.extend(_closest_symbols(symbol, exchange.markets))
+
+    msg = f"Не нашёл ставку фандинга для '{symbol}' на '{exchange_id}' (нужен бессрочный контракт)"
+    if exchange_id in FUTURES_FALLBACK:
+        msg += f" — проверил и спот, и {FUTURES_FALLBACK[exchange_id]}"
+    if suggestions:
+        uniq = list(dict.fromkeys(suggestions))[:3]
+        msg += f". Может, имел в виду: {', '.join(uniq)}?"
+    raise ValueError(msg)
+
+
 async def fetch_prices_for_exchange(exchange_id: str, symbols: list[str]) -> dict[str, float]:
     """Fetch current prices for several symbols on one exchange, batching where possible."""
     exchange = await get_exchange(exchange_id)
@@ -106,6 +156,23 @@ async def fetch_prices_for_exchange(exchange_id: str, symbols: list[str]) -> dic
                 prices[s] = t["last"]
         except Exception as e:
             logger.warning("Failed to fetch ticker for %s on %s: %s", s, exchange_id, e)
+    return prices
+
+
+async def fetch_funding_rates_for_exchange(exchange_id: str, symbols: list[str]) -> dict[str, float]:
+    """Fetch current funding rates for several symbols on one exchange.
+
+    Unlike fetch_prices_for_exchange there's no batch attempt first - ccxt's
+    fetchFundingRates support is inconsistent across exchanges (e.g. mexc
+    doesn't have it), and funding alerts are checked on a much slower cadence
+    than price alerts, so a handful of individual calls is cheap enough.
+    """
+    prices: dict[str, float] = {}
+    for s in symbols:
+        try:
+            prices[s] = await fetch_funding_rate(exchange_id, s)
+        except Exception as e:
+            logger.warning("Failed to fetch funding rate for %s on %s: %s", s, exchange_id, e)
     return prices
 
 
