@@ -84,6 +84,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="➕ Добавить алерт", callback_data="menu:add")],
             [InlineKeyboardButton(text="📋 Мои алерты", callback_data="menu:list")],
+            [InlineKeyboardButton(text="🔔 Тест Pushover", callback_data="menu:test_push")],
             [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu:help")],
         ]
     )
@@ -281,6 +282,21 @@ async def cb_help(callback: CallbackQuery):
         "3. Как только условие выполняется — приходит push в Pushover. "
         "Одноразовый алерт после этого переходит в сработавшие, повторяющийся остаётся активным.\n"
         "4. «Мои алерты» — список активных (🔂/🔁 показывает тип режима), с кнопкой 🗑 для удаления.",
+        reply_markup=main_menu_kb(),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "menu:test_push")
+async def cb_test_push(callback: CallbackQuery):
+    await _clear_old_markup(callback)
+    await send_pushover(
+        title="Тест CryptoAllert",
+        message="Если это уведомление держится, а не гаснет одним пиком — Pushover настроен верно.",
+    )
+    await callback.message.answer(
+        "Тестовое уведомление отправлено в Pushover. Проверь телефон — оно должно "
+        "прийти как критическое (звук/вибрация повторяются, пока не отметишь прочитанным).",
         reply_markup=main_menu_kb(),
     )
     await callback.answer()
