@@ -107,6 +107,15 @@ def get_all_alerts(user_id: int, limit: int = 20) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def get_alert_by_id(alert_id: int, user_id: int) -> dict | None:
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM alerts WHERE id = ? AND user_id = ?", (alert_id, user_id)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def delete_alert(alert_id: int, user_id: int) -> bool:
     conn = get_conn()
     cur = conn.execute("DELETE FROM alerts WHERE id = ? AND user_id = ?", (alert_id, user_id))

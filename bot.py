@@ -195,15 +195,16 @@ def alerts_list_kb(alerts: list[dict]) -> InlineKeyboardMarkup:
     # Full details live in the message text above (unlimited width, wraps
     # normally) - buttons just reference the alert by number, since cramming
     # exchange/pair/price into a button label gets clipped on a phone screen.
+    # Each alert gets its own row: copy (reuse exchange/pair/condition/mode,
+    # only re-enter the price/threshold) and delete.
     rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
     for i, a in enumerate(alerts, 1):
-        row.append(InlineKeyboardButton(text=f"🗑 {i}", callback_data=f"del:{a['id']}"))
-        if len(row) == 4:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+        rows.append(
+            [
+                InlineKeyboardButton(text=f"📋 Копировать {i}", callback_data=f"copy:{a['id']}"),
+                InlineKeyboardButton(text=f"🗑 {i}", callback_data=f"del:{a['id']}"),
+            ]
+        )
     rows.append([InlineKeyboardButton(text="⬅ В меню", callback_data="menu:back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -324,6 +325,59 @@ async def cb_delete(callback: CallbackQuery):
     else:
         await callback.message.answer(alerts_list_text(alerts), reply_markup=alerts_list_kb(alerts))
     await callback.answer("Удалено")
+
+
+@dp.callback_query(F.data.startswith("copy:"))
+async def cb_copy(callback: CallbackQuery, state: FSMContext):
+    await _clear_old_markup(callback)
+    alert_id = int(callback.data.split(":", 1)[1])
+    alert = db.get_alert_by_id(alert_id, callback.from_user.id)
+    if not alert:
+        await callback.message.answer("Алерт не найден (возможно, уже удалён).", reply_markup=main_menu_kb())
+        await callback.answer()
+        return
+
+    kind = alert.get("kind", "price")
+    mode = alert.get("mode", "one_time")
+    await state.clear()
+    await state.update_data(
+        kind=kind,
+        exchange=alert["exchange"],
+        symbol=alert["symbol"],
+        condition=alert["condition"],
+        mode=mode,
+        copying=True,
+    )
+    await state.set_state(AddAlert.entering_price)
+
+    if kind == "funding":
+        side = "short" if alert["condition"] == "below" else "long"
+        await state.update_data(side=side)
+        try:
+            rate = await exchanges.fetch_funding_rate(alert["exchange"], alert["symbol"])
+            await state.update_data(current_rate=rate)
+        except Exception:
+            rate = None
+        rate_line = f"Текущий фандинг: {rate * 100:.4f}%\n" if rate is not None else ""
+        await callback.message.answer(
+            f"Копирую алерт: {exchange_label(alert['exchange'])} · {alert['symbol']} ({SIDE_LABELS[side]})\n"
+            f"{rate_line}Режим останется прежним ({MODE_LABELS[mode]}).\n"
+            "Введи новый порог в %:"
+        )
+    else:
+        try:
+            _, _, price = await exchanges.resolve_symbol(alert["exchange"], alert["symbol"])
+            await state.update_data(current_price=price)
+        except Exception:
+            price = None
+        word = "выше" if alert["condition"] == "above" else "ниже"
+        price_line = f"Текущая цена: {price:g}\n" if price is not None else ""
+        await callback.message.answer(
+            f"Копирую алерт: {exchange_label(alert['exchange'])} · {alert['symbol']} ({word})\n"
+            f"{price_line}Режим останется прежним ({MODE_LABELS[mode]}).\n"
+            "Введи новую цену:"
+        )
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "noop")
@@ -493,6 +547,13 @@ async def msg_price(message: Message, state: FSMContext):
         return
     target = value / 100 if kind == "funding" else value
     await state.update_data(target_price=target)
+
+    if data.get("copying"):
+        # Came from "📋 Копировать": exchange/pair/condition/mode are already
+        # set from the original alert, only the price/threshold changed.
+        await _send_confirmation(message, state)
+        return
+
     await state.set_state(AddAlert.choosing_mode)
     await message.answer(
         "Один раз — сработает и отключится.\n"
@@ -502,12 +563,10 @@ async def msg_price(message: Message, state: FSMContext):
     )
 
 
-@dp.callback_query(AddAlert.choosing_mode, F.data.startswith("mode:"))
-async def cb_mode(callback: CallbackQuery, state: FSMContext):
-    mode = callback.data.split(":", 1)[1]
-    await state.update_data(mode=mode)
+async def _send_confirmation(send_target, state: FSMContext) -> None:
     data = await state.get_data()
     kind = data.get("kind", "price")
+    mode = data.get("mode", "one_time")
 
     if kind == "funding":
         current = data.get("current_rate")
@@ -525,8 +584,7 @@ async def cb_mode(callback: CallbackQuery, state: FSMContext):
         condition_line = f"Условие: цена {word} {data['target_price']:g}\n"
 
     await state.set_state(AddAlert.confirming)
-    await _clear_old_markup(callback)
-    await callback.message.answer(
+    await send_target.answer(
         f"Биржа: {exchange_label(data['exchange'])}\n"
         f"Пара: {data['symbol']}\n"
         f"{current_line}"
@@ -534,6 +592,14 @@ async def cb_mode(callback: CallbackQuery, state: FSMContext):
         f"Режим: {MODE_LABELS[mode]}\n\nСоздать алерт?",
         reply_markup=confirm_kb(),
     )
+
+
+@dp.callback_query(AddAlert.choosing_mode, F.data.startswith("mode:"))
+async def cb_mode(callback: CallbackQuery, state: FSMContext):
+    mode = callback.data.split(":", 1)[1]
+    await state.update_data(mode=mode)
+    await _clear_old_markup(callback)
+    await _send_confirmation(callback.message, state)
     await callback.answer()
 
 
